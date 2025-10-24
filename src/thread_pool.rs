@@ -608,6 +608,36 @@ impl ThreadPool {
         self.spawn_future(future)
     }
 
+    /// Spawns a job onto the thread pool shared queue. Current thread
+    /// will not become a worker and will wake a worker instead.
+    ///
+    /// See also: [`Worker::spawn`] and [`spawn`].
+    #[inline(always)]
+    pub fn spawn_shared<F>(&'static self, f: F)
+    where
+        F: FnOnce(&Worker) + Send + 'static,
+    {
+        let job = HeapJob::new(f);
+        let job_ref = unsafe { job.into_job_ref() };
+        self.shared_jobs.push(job_ref);
+
+        // Try to wake a worker to work on it
+        let state = self.state.lock().unwrap();
+        let num_seats = state.seats.len();
+        // Creating a new prng every spawn isn't great, but it's better than
+        // `Self::with_worker`
+        let offset = XorShift64Star::new().next_usize(num_seats);
+        for i in 0..num_seats {
+            let i = (i + offset) % num_seats;
+            if state.seats[i].occupied {
+                let ready = state.seats[i].data.sleep_controller.wake();
+                if ready {
+                    return;
+                }
+            }
+        }
+    }
+
     /// Blocks the thread waiting for a future to complete.
     ///
     /// See also: [`Worker::block_on`] and [`block_on`].
